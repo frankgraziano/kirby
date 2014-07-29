@@ -6,15 +6,6 @@
 #include <unistd.h>
 #include <stdlib.h>
 
-/* Notes:
-
-    offset = ((ehdr->e_shstrndx)*ehdr->e_shentsize)+ehdr->e_shoff;
-    where...
-    ehdr->e_shstrndx = index where we can find .shstrtab
-    ehdr->e_shentsize = Size of each Section Header
-    ehdr->e_shoff = Offset at which section header starts.
-*/
-
 using namespace std;
 
 typedef uint8_t  Elf32_Char;	// Unsigned char
@@ -102,9 +93,6 @@ int WriteAt(int hFile, int pos, void* buf, int count)
     return -1;
 }
 
-//char *ReadSection(int hFile, Elf32_Ehdr *hdr, int index)
-//question? why for shdr since it's a "real" struct can we no use the -> notation to reference member?
-// the Ehdr structure is referenced via pointer *hdr so we can use -> on it...
 char *ReadSection(int hFile, Elf32_Ehdr *hdr)
 {
 	char *pbuf;
@@ -155,12 +143,13 @@ void printSection(char *fileNameOfElf)
         goto close_file;
     }
 
-//    strTable = ReadSection(hFile, &ehdr, ehdr.e_shstrndx);
     strTable = ReadSection(hFile, &ehdr);
     if(strTable == NULL)
         goto error;
 
     int i;
+    cout << "There are " << ehdr.e_shnum << " Section Headers." <<endl;
+
     for(i = 0;i < ehdr.e_shnum; i++) {
         if(sizeof(shdr) == ReadAt(hFile,
                     ehdr.e_shoff + i*ehdr.e_shentsize,
@@ -178,21 +167,136 @@ void printSection(char *fileNameOfElf)
     goto close_file;
 
 error:
-    printf("read section info error!\n");
+    printf("Error reading Section Headers!\n");
 close_file:
     if(strTable)
         free(strTable);
 	close(hFile);
 }
 
-/* creates a Shdr (Section Header pointer relative to the e_shoff from the passed Ehdr*/
-static inline Elf32_Shdr *elf_sheader(Elf32_Ehdr *hdr) {
-    return (Elf32_Shdr *)((int)hdr + hdr->e_shoff);
+char *readProgram(int hFile, Elf32_Ehdr *hdr)
+{
+        char *pbuf;
+        Elf32_Phdr phdr;
+	int idx = 1;
+        int offset;
+
+        offset = hdr->e_phoff + hdr->e_phentsize * idx;
+
+    if (sizeof(phdr) != ReadAt(hFile, offset, &phdr, sizeof(phdr)))
+        return NULL;
+
+         pbuf = (char *)malloc(phdr.p_filesz);
+    if(pbuf != NULL) {
+        if(phdr.p_filesz == ReadAt(hFile, phdr.p_offset, pbuf, phdr.p_filesz))
+            return pbuf;
+        free(pbuf);
+    }
+    return NULL;
+
 }
 
-/* using the passed index we create a section header pointer for each index*/
-static inline Elf32_Shdr *elf_section(Elf32_Ehdr *hdr, int idx) {
-    return &elf_sheader(hdr)[idx];
+void printProgram(char *fileNameOfElf)
+{
+	int hFile;
+    	int offset;
+    	Elf32_Ehdr ehdr;
+    	Elf32_Phdr phdr;
+    	char *segTable;
+    	segTable = NULL;
+
+    	hFile = open(fileNameOfElf, O_RDONLY, 0);
+    	if(hFile < 0)
+	{
+        	printf("can not open file:%s\n", fileNameOfElf);
+        	goto error;
+    	}
+
+    	if(sizeof(ehdr) != ReadAt(hFile, 0, &ehdr, sizeof(ehdr)))
+        	goto error;
+
+    	if(ehdr.e_phnum <= 0|| ehdr.e_phoff == 0)
+	{
+        	printf("This ELF doesn't have a Program Header Table! \n");
+        	goto close_file;
+	}
+
+	segTable = readProgram(hFile, &ehdr);
+
+	if(segTable == NULL)
+        	goto error;
+
+	int i;
+	cout << "There are " << ehdr.e_phnum << " Program Headers." <<endl;
+
+    	for(i = 0;i < ehdr.e_phnum; i++)
+	{
+		if(sizeof(phdr) == ReadAt(hFile, ehdr.e_phoff + i*ehdr.e_phentsize, &phdr, sizeof(phdr)))
+		{
+			string ph_name = "";
+			Elf32_Word type = 0;
+
+			switch (phdr.p_type)
+			{
+			case 0:
+				type = PT_NULL;
+				ph_name = "PT_NULL";
+				break;
+			case 1:
+				type = PT_LOAD;
+				ph_name = "PT_LOAD";
+				break;
+			case 2:
+				type = PT_DYNAMIC;
+				ph_name = "PT_DYNAMIC";
+				break;
+			case 3:
+				type = PT_INTERP;
+				ph_name = "PT_INTERP";
+				break;
+			case 4:
+				type = PT_NOTE;
+				ph_name = "PT_NOTE";
+				break;
+			case 5:
+				type = PT_SHLIB;
+				ph_name = "PT_SHLIB";
+				break;
+			case 6:
+				type = PT_PHDR;
+				ph_name = "PT_PHDR";
+				break;
+			case 7:
+				type = PT_TLS;
+				ph_name = "PT_TLS";
+				break;
+			case 8:
+				type = PT_NUM;
+				ph_name = "PT_NUM";
+				break;
+			default:
+				type = 0;
+				ph_name = "Unknown";
+				break;
+			}
+
+			cout << "Name: " << ph_name
+			<< "\tType: 0x" << type
+			<< "\tFlags: 0x" << phdr.p_flags
+			<< "\tOffset: 0x" << hex <<phdr.p_offset
+			<< "\tMemsize: 0x" << phdr.p_memsz
+			<< "\tVaddr: 0x" << hex << phdr.p_vaddr 
+			<<"\n" << endl;
+        	}
+    	}
+	goto close_file;
+
+error:
+    printf("Error Reading Program Headers!\n");
+close_file:
+    if(segTable)
+        free(segTable);
+        close(hFile);
 }
 
 int main ( int argc, char *argv[] )
@@ -208,26 +312,10 @@ else
 	fstream our_file;
 	char *arg1 = argv[1];
 
-/* Struct pointer playground */
 /* Ehdr structure pointers */
 Elf32_Ehdr elf32_ehdr;
 Elf32_Ehdr *pe_elf32;
 pe_elf32 = &elf32_ehdr;
-
-/* Program Header structure pointers */
-Elf32_Phdr elf32_phdr;
-Elf32_Phdr *pp_elf32;
-pp_elf32 = &elf32_phdr;
-
-/* Section Header structure pointers*/
-Elf32_Shdr elf32_shdr;
-Elf32_Shdr *ps_elf32;
-ps_elf32 = &elf32_shdr;
-
-/* Symbol Table structure pointers*/
-Elf32_Sym elf32_sym;
-Elf32_Sym *py_elf32;
-py_elf32 = &elf32_sym;
 
 our_file.open( argv[1], ios::in|ios::binary);
 	if ( our_file.is_open() )
@@ -262,6 +350,8 @@ our_file.open( argv[1], ios::in|ios::binary);
 		{
 		cout << "[*] Dumping ELF Info...\n";
 		printSection(arg1);
+		cout << "[*] Dumping ELF Info...\n";
+                printProgram(arg1);
 		}
 
     	}
